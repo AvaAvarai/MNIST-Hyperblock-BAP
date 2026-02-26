@@ -4,6 +4,8 @@ Structured MNIST dimensional and case reduction for interpretable hyperblock cla
 
 The repository is organized as a modular Python pipeline. Each stage produces analyzable outputs, culminating in datasets suitable for Visual Knowledge Discovery.
 
+To use download_mnist_csv.py, you need a Kaggle account with a legacy API credentials key (username and key) from the legacy credential generation page. These credentials can be used via a kaggle.json file or directly as environment variables, as described in python_scripts/download_mnist_csv.py. The kaggle.json file is convenient but not strictly required.
+
 ## Data Source
 
 This repository uses the MNIST dataset, publicly available from the [UCI Machine Learning Repository](https://archive.ics.uci.edu/dataset/683/mnist+database+of+handwritten+digits).
