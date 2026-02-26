@@ -2,6 +2,8 @@
 
 Structured MNIST dimensional and case reduction for interpretable hyperblock classification and lossless geometric visualization.
 
+The repository is organized as a modular Python pipeline. Each stage produces analyzable outputs, culminating in datasets suitable for Visual Knowledge Discovery.
+
 ## Data Source
 
 This repository uses the MNIST dataset, publicly available from the [UCI Machine Learning Repository](https://archive.ics.uci.edu/dataset/683/mnist+database+of+handwritten+digits).
