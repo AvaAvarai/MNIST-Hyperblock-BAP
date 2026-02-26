@@ -8,9 +8,12 @@ Apply dimensionality reduction to MNIST CSV datasets as described in DR.md:
 Result: 121/784 ≈ 15.4% of original dimensionality.
 """
 
+import sys
 import pandas as pd
 import numpy as np
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
 
 
 def reduce_mnist_image(pixels_1d: np.ndarray) -> np.ndarray:
@@ -95,6 +98,14 @@ def main():
     )
 
     print(f"Done. Created mnist_train_dr.csv and mnist_test_dr.csv in {data_dir}")
+
+    from dataset_stats import print_dataset_stats
+    train_dr_path = data_dir / "mnist_train_dr.csv"
+    test_dr_path = data_dir / "mnist_test_dr.csv"
+    if train_dr_path.exists() and test_dr_path.exists():
+        train_df = pd.read_csv(str(train_dr_path))
+        test_df = pd.read_csv(str(test_dr_path))
+        print_dataset_stats(train_df, test_df, label_col="class", dim=121)
 
 
 if __name__ == "__main__":

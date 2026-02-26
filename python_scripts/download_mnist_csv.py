@@ -91,13 +91,20 @@ def main():
         except OSError:
             pass
 
-    # Verify expected files exist
+    # Verify expected files exist and print stats
     train_path = data_dir / "mnist_train.csv"
     test_path = data_dir / "mnist_test.csv"
     if train_path.exists() and test_path.exists():
         print(f"\nDone. Saved to {data_dir}:")
         print(f"  - {train_path.name}")
         print(f"  - {test_path.name}")
+        import sys
+        import pandas as pd
+        sys.path.insert(0, str(Path(__file__).parent))
+        from dataset_stats import print_dataset_stats
+        train_df = pd.read_csv(train_path)
+        test_df = pd.read_csv(test_path)
+        print_dataset_stats(train_df, test_df, label_col="label", dim=784)
     else:
         print("\nDownload complete. Check data/ for mnist_train.csv and mnist_test.csv")
 
