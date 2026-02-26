@@ -10,7 +10,7 @@ To use download_mnist_csv.py, you need a Kaggle account with a legacy API creden
 
 This repository uses the MNIST dataset, publicly available from the [UCI Machine Learning Repository](https://archive.ics.uci.edu/dataset/683/mnist+database+of+handwritten+digits).
 
-The specific CSV-formatted version used in experiments is available via Kaggle [here](https://www.kaggle.com/datasets/oddrationale/mnist-in-csv).
+For all experiments in this repository, we use a preprocessed CSV-format version of the MNIST dataset. This version is hosted on Kaggle and provides the digit images as flattened arrays, with each row representing a single handwritten digit and its class label. You can download it from Kaggle at [this link](https://www.kaggle.com/datasets/oddrationale/mnist-in-csv).
 
 The dataset is not redistributed in this repository.
 
