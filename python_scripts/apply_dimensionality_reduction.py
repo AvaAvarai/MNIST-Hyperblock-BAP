@@ -75,19 +75,26 @@ def process_mnist_csv(input_path: str, output_path: str) -> None:
 
 
 def main():
-    base = Path(__file__).parent
-    
+    data_dir = Path(__file__).resolve().parent.parent / "data"
+    train_path = data_dir / "mnist_train.csv"
+    test_path = data_dir / "mnist_test.csv"
+
+    if not train_path.exists() or not test_path.exists():
+        raise SystemExit(
+            f"Input files not found in {data_dir}. Run download_mnist_csv.py first."
+        )
+
     process_mnist_csv(
-        str(base / "mnist_train.csv"),
-        str(base / "mnist_train_reduced.csv")
+        str(train_path),
+        str(data_dir / "mnist_train_dr.csv"),
     )
-    
+
     process_mnist_csv(
-        str(base / "mnist_test.csv"),
-        str(base / "mnist_test_reduced.csv")
+        str(test_path),
+        str(data_dir / "mnist_test_dr.csv"),
     )
-    
-    print("Done. Created mnist_train_reduced.csv and mnist_test_reduced.csv")
+
+    print(f"Done. Created mnist_train_dr.csv and mnist_test_dr.csv in {data_dir}")
 
 
 if __name__ == "__main__":
