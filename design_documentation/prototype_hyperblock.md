@@ -48,3 +48,12 @@ Classification uses k-NN over the hyperblocks:
 - PHyper is a different paradigm—prototype-based rather than interval/merge-based. It shares the same output format (hyperblocks with lower/upper edges and labels) but produces only degenerate single-point blocks. For single-point blocks, distance to the block equals distance to the point, so classification is equivalent to k-NN on the prototypes. The former hyper methods produce true hyperboxes that can cover regions; PHyper only represents points (centroids).
 - This gives O(n) vs O(n²) for merge changes which is much faster on larger n of data. This uses centroids of classes as seeds instead of actual training cases. Results are still geometric but degenerate instead of full area covering HBs.
 - This approach can have output HBs constrained to a specific count and can be repeated with this parameter variated until the output HBs are sufficient for 95%+ accuracy on test data of classification. This is how it was used to find the current result set.
+
+## Post-Processing HB-V Algorithm
+
+The idea of the HB-V algorithm to keep both Hyperblocks and Voting mechanism is as follows:
+
+    Expand single case hyperblocks to HBs with more cases as possible to keep HBs pure.
+    Vote only for cases outside of those HBs.
+
+The advantage of this algorithm is that it can separate more difficult cases from simpler cases.  Classification of cases within the pure hyperblocks is simpler to justify than cases outside of HBs that may have neighbors from other classes with voting can be acceptable for them.
