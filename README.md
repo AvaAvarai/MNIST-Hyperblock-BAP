@@ -14,13 +14,13 @@ For all experiments in this repository, we use a preprocessed CSV-format version
 
 The dataset is not redistributed in this repository.
 
-## Associated Publications
+## References
 
-**Hyperblock algorithms:**  
-L. Huber, B. Kovalerchuk, and C. Recaido, “Visual knowledge discovery with general line coordinates,” in *Artificial Intelligence and Visualization: Advancing Visual Knowledge Discovery*, Cham, Switzerland: Springer Nature Switzerland, 2024, pp. 159–202.
+[1] A. Williams and B. Kovalerchuk, “Quantifying AI Model Trust as a Model Sureness Measure by Bidirectional Active Processing and Visual Knowledge Discovery,” *Electronics*, 2026.
 
-**Bidirectional Active Processing and Model Sureness:**  
-A. Williams and B. Kovalerchuk, “Quantifying AI Model Trust as a Model Sureness Measure by Bidirectional Active Processing and Visual Knowledge Discovery,” *Electronics*, 2026.
+[2] L. Huber, B. Kovalerchuk, and C. Recaido, “Visual knowledge discovery with general line coordinates,” in *Artificial Intelligence and Visualization: Advancing Visual Knowledge Discovery*, Cham, Switzerland: Springer Nature Switzerland, 2024, pp. 159–202. (IHyper, MHyper, IMHyper algorithms.)
+
+[3] A. Snyder, R. Gallagher, and B. Kovalerchuk, “Fully explainable classification models using hyperblocks,” arXiv:2506.06986v1 [cs.LG], 2025. (Classification; HB simplification algorithms.)
 
 ## License
 
