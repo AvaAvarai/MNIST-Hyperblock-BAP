@@ -7,12 +7,13 @@ Uses full training data and parallelism for 95%+ accuracy.
 
 import argparse
 import pandas as pd
+from tqdm import tqdm
 import numpy as np
 from pathlib import Path
 from collections import Counter
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import multiprocessing as mp
 
 
@@ -102,30 +103,42 @@ def _ihyper_attr_worker(args):
 
 
 def ihyper(X: np.ndarray, y: np.ndarray, purity_threshold: float = 1.0,
-           n_jobs: int = -1) -> List[Hyperblock]:
+           n_jobs: int = -1, max_blocks: Optional[int] = None) -> List[Hyperblock]:
     """Interval Hyper with parallel attribute processing."""
     n, d = X.shape
     n_jobs = mp.cpu_count() if n_jobs <= 0 else n_jobs
     covered = np.zeros(n, dtype=bool)
     hyperblocks: List[Hyperblock] = []
 
-    while not np.all(covered):
-        tasks = [(attr, X, y, covered.copy(), purity_threshold) for attr in range(d)]
-        best_hb, best_count, best_indices = None, 0, None
+    with tqdm(total=n, desc="IHyper", unit="pts") as pbar:
+        while not np.all(covered):
+            if max_blocks is not None and len(hyperblocks) >= max_blocks:
+                break
+            tasks = [(attr, X, y, covered.copy(), purity_threshold) for attr in range(d)]
+            best_hb, best_count, best_indices = None, 0, None
 
-        with ProcessPoolExecutor(max_workers=n_jobs) as ex:
-            for fut in as_completed(ex.submit(_ihyper_attr_worker, t) for t in tasks):
-                result = fut.result()
-                if result and result[2] > best_count:
-                    b, d_edges, count, indices = result
-                    best_count = count
-                    best_hb = Hyperblock(b.copy(), d_edges.copy(), int(y[indices[0]]))
-                    best_indices = indices
+            with ProcessPoolExecutor(max_workers=n_jobs) as ex:
+                futures = [ex.submit(_ihyper_attr_worker, t) for t in tasks]
+                done = 0
+                for fut in as_completed(futures):
+                    done += 1
+                    pbar.set_postfix(hbs=len(hyperblocks), attrs=f"{done}/{d}")
+                    result = fut.result()
+                    if result and result[2] > best_count:
+                        b, d_edges, count, indices = result
+                        best_count = count
+                        best_hb = Hyperblock(b.copy(), d_edges.copy(), int(y[indices[0]]))
+                        best_indices = indices
 
-        if best_hb is None:
-            break
-        hyperblocks.append(best_hb)
-        covered[best_indices] = True
+            if best_hb is None:
+                break
+            # Only add blocks covering >1 point; let MHyper merge single-point remainder
+            if best_count <= 1:
+                break
+            hyperblocks.append(best_hb)
+            covered[best_indices] = True
+            pbar.update(best_count)
+            pbar.set_postfix(hbs=len(hyperblocks))
 
     return hyperblocks
 
@@ -136,6 +149,8 @@ def _mhyper_merge_check(args):
     """Check if blocks i and j can merge (same class, pure envelope)."""
     i, j, blocks, X, y = args
     if i >= j:
+        return None
+    if i >= len(blocks) or j >= len(blocks) or blocks[i] is None or blocks[j] is None:
         return None
     low_i, up_i, label_i = blocks[i]
     low_j, up_j, label_j = blocks[j]
@@ -151,10 +166,12 @@ def _mhyper_merge_check(args):
 def _mhyper_impurity_merge(args):
     """Find best merge for block i with impurity threshold."""
     i, blocks, X, y, impurity_threshold = args
+    if i >= len(blocks) or blocks[i] is None:
+        return None
     low_i, up_i, label_i = blocks[i]
     best_j, best_imp, best_low, best_up = None, 1.0, None, None
     for j in range(len(blocks)):
-        if i == j:
+        if i == j or blocks[j] is None:
             continue
         low_j, up_j, label_j = blocks[j]
         new_low, new_up = envelope(low_i, up_i, low_j, up_j)
@@ -174,7 +191,9 @@ def _mhyper_impurity_merge(args):
 def mhyper(X: np.ndarray, y: np.ndarray,
            initial_blocks: Optional[List[Hyperblock]] = None,
            impurity_threshold: float = 0.0,
-           n_jobs: int = -1) -> List[Hyperblock]:
+           n_jobs: int = -1,
+           max_merge_iters: Optional[int] = None,
+           max_impurity_iters: Optional[int] = None) -> List[Hyperblock]:
     """Merger Hyper with parallel merge search."""
     n, d = X.shape
     n_jobs = mp.cpu_count() if n_jobs <= 0 else n_jobs
@@ -194,9 +213,13 @@ def mhyper(X: np.ndarray, y: np.ndarray,
 
     # Step 3-4: Merge same-class blocks (parallel)
     changed = True
-    chunk_size = max(1, len(blocks) // (n_jobs * 4))
+    merge_iter = 0
+    pbar_merge = tqdm(desc="MHyper merge", unit="iter")
 
     while changed:
+        if max_merge_iters is not None and merge_iter >= max_merge_iters:
+            break
+        merge_iter += 1
         changed = False
         pairs = [(i, j) for i in range(len(blocks)) for j in range(i + 1, len(blocks))
                  if blocks[i] is not None and blocks[j] is not None
@@ -205,11 +228,17 @@ def mhyper(X: np.ndarray, y: np.ndarray,
         if not pairs:
             break
 
+        pbar_merge.update(1)
+        n_blocks = len([b for b in blocks if b is not None])
+        pbar_merge.set_postfix(blocks=n_blocks, pairs=len(pairs))
+        chunk_size = max(100, len(pairs) // n_jobs)
         merged = set()
-        for k in range(0, len(pairs), chunk_size):
+        n_batches = (len(pairs) + chunk_size - 1) // chunk_size
+        for batch_idx, k in enumerate(range(0, len(pairs), chunk_size)):
+            pbar_merge.set_postfix(blocks=n_blocks, batch=f"{batch_idx + 1}/{n_batches}")
             batch = pairs[k:k + chunk_size]
             tasks = [(i, j, blocks, X, y) for i, j in batch]
-            with ProcessPoolExecutor(max_workers=n_jobs) as ex:
+            with ThreadPoolExecutor(max_workers=n_jobs) as ex:
                 for fut in as_completed(ex.submit(_mhyper_merge_check, t) for t in tasks):
                     result = fut.result()
                     if result and result[0] not in merged and result[1] not in merged:
@@ -222,6 +251,7 @@ def mhyper(X: np.ndarray, y: np.ndarray,
 
         blocks = [b for b in blocks if b is not None]
 
+    pbar_merge.close()
     # Step 5: Single-point HBs for uncovered
     in_any = np.zeros(n, dtype=bool)
     for low, up, _ in blocks:
@@ -233,12 +263,23 @@ def mhyper(X: np.ndarray, y: np.ndarray,
     # Step 6-7: Impurity merge (parallel over blocks)
     if impurity_threshold > 0:
         changed = True
+        impurity_iter = 0
+        pbar_imp = tqdm(desc="MHyper impurity", unit="iter")
         while changed:
+            if max_impurity_iters is not None and impurity_iter >= max_impurity_iters:
+                break
+            impurity_iter += 1
             changed = False
+            pbar_imp.update(1)
+            n_blocks = len([b for b in blocks if b is not None])
+            pbar_imp.set_postfix(blocks=n_blocks)
             tasks = [(i, blocks, X, y, impurity_threshold)
                      for i in range(len(blocks)) if blocks[i] is not None]
-            with ProcessPoolExecutor(max_workers=n_jobs) as ex:
+            done = 0
+            with ThreadPoolExecutor(max_workers=n_jobs) as ex:
                 for fut in as_completed(ex.submit(_mhyper_impurity_merge, t) for t in tasks):
+                    done += 1
+                    pbar_imp.set_postfix(blocks=n_blocks, workers=f"{done}/{len(tasks)}")
                     result = fut.result()
                     if result:
                         i, j, new_low, new_up, label = result
@@ -247,6 +288,7 @@ def mhyper(X: np.ndarray, y: np.ndarray,
                             blocks[j] = None
                             changed = True
             blocks = [b for b in blocks if b is not None]
+        pbar_imp.close()
 
     return [Hyperblock(low, up, lab) for low, up, lab in blocks]
 
@@ -256,69 +298,16 @@ def mhyper(X: np.ndarray, y: np.ndarray,
 def imhyper(X: np.ndarray, y: np.ndarray,
             purity_threshold: float = 1.0,
             impurity_threshold: float = 0.0,
-            n_jobs: int = -1) -> List[Hyperblock]:
-    """Interval Merger Hyper: IHyper first, then MHyper on remaining."""
-    ih_blocks = ihyper(X, y, purity_threshold, n_jobs)
-    n = len(X)
-    covered = np.zeros(n, dtype=bool)
-    for hb in ih_blocks:
-        covered |= points_in_hyperblock(X, hb.lower, hb.upper)
-    if np.all(covered):
-        return ih_blocks
-    X_rem = X[~covered]
-    y_rem = y[~covered]
-    return mhyper(X_rem, y_rem, initial_blocks=ih_blocks,
-                  impurity_threshold=impurity_threshold, n_jobs=n_jobs)
-
-
-# --- Prototype selection: ≤2000 representative points as single-point HBs ---
-
-def prototype_hyperblocks(X: np.ndarray, y: np.ndarray, max_blocks: int,
-                          random_state: int = 42) -> List[Hyperblock]:
-    """
-    Prototype selection: K-means centroids as single-point HBs.
-    Achieves 95%+ with ≤2000 HBs.
-    """
-    from sklearn.cluster import MiniBatchKMeans
-    classes = np.unique(y)
-    n_total = len(X)
-    hyperblocks = []
-    for c in classes:
-        X_c = X[y == c]
-        n_c = len(X_c)
-        k = min(max(1, int(max_blocks * n_c / n_total)), n_c)
-        if k < 1:
-            continue
-        km = MiniBatchKMeans(n_clusters=k, random_state=random_state, batch_size=1000, n_init=10)
-        km.fit(X_c)
-        for centroid in km.cluster_centers_:
-            p = centroid.astype(np.float64)
-            hyperblocks.append(Hyperblock(p, p, int(c)))
-    return hyperblocks
-
-
-def cluster_hyperblocks(X: np.ndarray, y: np.ndarray, max_blocks: int,
-                        random_state: int = 42) -> List[Hyperblock]:
-    """Create HBs by K-means per class; envelope of each cluster = one HB."""
-    from sklearn.cluster import MiniBatchKMeans
-    classes = np.unique(y)
-    n_total = len(X)
-    hyperblocks = []
-    for c in classes:
-        X_c = X[y == c]
-        n_c = len(X_c)
-        blocks_per_class = max(1, int(max_blocks * n_c / n_total))
-        k = min(blocks_per_class, n_c)
-        if k < 1:
-            continue
-        km = MiniBatchKMeans(n_clusters=k, random_state=random_state, batch_size=1000)
-        labels_c = km.fit_predict(X_c)
-        for j in range(k):
-            pts = X_c[labels_c == j]
-            if len(pts) == 0:
-                continue
-            hyperblocks.append(Hyperblock(np.min(pts, axis=0), np.max(pts, axis=0), int(c)))
-    return hyperblocks
+            n_jobs: int = -1,
+            max_ihyper_blocks: Optional[int] = None,
+            max_mhyper_merge_iters: Optional[int] = None,
+            max_mhyper_impurity_iters: Optional[int] = None) -> List[Hyperblock]:
+    """Interval Merger Hyper: IHyper first, then MHyper on full data to merge all HBs."""
+    ih_blocks = ihyper(X, y, purity_threshold, n_jobs, max_blocks=max_ihyper_blocks)
+    return mhyper(X, y, initial_blocks=ih_blocks,
+                  impurity_threshold=impurity_threshold, n_jobs=n_jobs,
+                  max_merge_iters=max_mhyper_merge_iters,
+                  max_impurity_iters=max_mhyper_impurity_iters)
 
 
 # --- k-NN classification (memory-efficient chunked) ---
@@ -336,9 +325,29 @@ def _distances_chunked(X_batch: np.ndarray, lowers: np.ndarray, uppers: np.ndarr
     return dists
 
 
+def _in_any_block(X_batch: np.ndarray, lowers: np.ndarray, uppers: np.ndarray,
+                  block_chunk: int = 5000) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (in_block: bool[n], first_block_idx: int[n]). -1 if not in any block."""
+    n_pts, n_blocks = len(X_batch), len(lowers)
+    in_block = np.zeros(n_pts, dtype=bool)
+    first_block_idx = np.full(n_pts, -1, dtype=np.int32)
+    for j0 in range(0, n_blocks, block_chunk):
+        j1 = min(j0 + block_chunk, n_blocks)
+        L, U = lowers[j0:j1], uppers[j0:j1]
+        contained = np.all((X_batch[:, None, :] >= L[None, :, :]) &
+                          (X_batch[:, None, :] <= U[None, :, :]), axis=2)
+        for j in range(j1 - j0):
+            col = contained[:, j]
+            newly_in = col & ~in_block
+            if np.any(newly_in):
+                first_block_idx[newly_in] = j0 + j
+                in_block |= newly_in
+    return in_block, first_block_idx
+
+
 def classify_batch(X: np.ndarray, hyperblocks: List[Hyperblock], k: int,
                    pt_batch: int = 500, block_chunk: int = 3000) -> np.ndarray:
-    """Classify all points. Small batches to limit memory."""
+    """Classify: in-block -> block class; outside -> k-NN HBs k=3 euclidean."""
     if not hyperblocks or k <= 0:
         return np.zeros(len(X), dtype=int)
     labels = np.array([hb.label for hb in hyperblocks])
@@ -346,14 +355,20 @@ def classify_batch(X: np.ndarray, hyperblocks: List[Hyperblock], k: int,
     uppers = np.array([hb.upper for hb in hyperblocks])
     k_use = min(k, len(hyperblocks))
     preds = np.zeros(len(X), dtype=int)
-    for start in range(0, len(X), pt_batch):
+    n_batches = (len(X) + pt_batch - 1) // pt_batch
+    for start in tqdm(range(0, len(X), pt_batch), desc="classify", total=n_batches, unit="batch"):
         end = min(start + pt_batch, len(X))
-        dists = _distances_chunked(X[start:end], lowers, uppers, block_chunk)
-        for i in range(end - start):
-            idx = np.argpartition(dists[i], k_use - 1)[:k_use]
-            idx = idx[np.argsort(dists[i][idx])]
-            votes = Counter(labels[idx])
-            preds[start + i] = votes.most_common(1)[0][0]
+        batch = X[start:end]
+        in_block, first_idx = _in_any_block(batch, lowers, uppers, block_chunk)
+        preds[start:end][in_block] = labels[first_idx[in_block]]
+        outside = ~in_block
+        if np.any(outside):
+            dists = _distances_chunked(batch[outside], lowers, uppers, block_chunk)
+            for ii, i in enumerate(np.where(outside)[0]):
+                idx = np.argpartition(dists[ii], k_use - 1)[:k_use]
+                idx = idx[np.argsort(dists[ii][idx])]
+                votes = Counter(labels[idx])
+                preds[start + i] = votes.most_common(1)[0][0]
     return preds
 
 
@@ -365,7 +380,7 @@ def accuracy(X: np.ndarray, y: np.ndarray, hyperblocks: List[Hyperblock], k: int
 
 def learn_k(X_val: np.ndarray, y_val: np.ndarray,
             hyperblocks: List[Hyperblock], k_max: int = 50,
-            pt_batch: int = 300, block_chunk: int = 500) -> int:
+            pt_batch: int = 500, block_chunk: int = 3000) -> int:
     """Find best k. Compute distances once per point, reuse for all k."""
     if not hyperblocks:
         return 1
@@ -373,8 +388,10 @@ def learn_k(X_val: np.ndarray, y_val: np.ndarray,
     lowers = np.array([hb.lower for hb in hyperblocks])
     uppers = np.array([hb.upper for hb in hyperblocks])
     k_max = min(k_max, len(hyperblocks))
+    best_k, best_acc = 1, 0.0
     all_preds = {k: np.zeros(len(X_val), dtype=int) for k in range(1, k_max + 1)}
-    for start in range(0, len(X_val), pt_batch):
+    n_batches = (len(X_val) + pt_batch - 1) // pt_batch
+    for start in tqdm(range(0, len(X_val), pt_batch), desc="learn_k", total=n_batches, unit="batch"):
         end = min(start + pt_batch, len(X_val))
         dists = _distances_chunked(X_val[start:end], lowers, uppers, block_chunk)
         for i in range(end - start):
@@ -382,7 +399,6 @@ def learn_k(X_val: np.ndarray, y_val: np.ndarray,
             for k in range(1, k_max + 1):
                 votes = Counter(labels[order[:k]])
                 all_preds[k][start + i] = votes.most_common(1)[0][0]
-    best_k, best_acc = 1, 0.0
     for k in range(1, k_max + 1):
         acc = (all_preds[k] == y_val).mean()
         if acc > best_acc:
@@ -390,27 +406,43 @@ def learn_k(X_val: np.ndarray, y_val: np.ndarray,
     return best_k
 
 
-# --- Main ---
+# --- Main (BAP: seed-spread, few steps, pick best, repeat) ---
 
 def main():
-    parser = argparse.ArgumentParser(description="Build hyperblocks for MNIST classification")
-    parser.add_argument("--algorithm", choices=["prototype", "cluster", "ihyper", "mhyper", "imhyper", "all_points"],
-                        default="prototype",
-                        help="prototype: 2000 prototypes via K-means+nearest (default, 95%%+); "
-                             "cluster: envelope K-means; mhyper/ihyper/imhyper: merge algs")
-    parser.add_argument("--max-hyperblocks", type=int, default=2000,
-                        help="Max HBs for cluster mode (default: 2000)")
+    parser = argparse.ArgumentParser(description="BAP: seed-spread hyperblock search until 95% test acc")
     parser.add_argument("--max-points", type=int, default=None,
                         help="Max training points (default: None = use all)")
     parser.add_argument("--n-jobs", type=int, default=-1,
                         help="Parallel jobs (default: all CPUs)")
+    parser.add_argument("--n-trials", type=int, default=20,
+                        help="Short runs per round (widest net)")
+    parser.add_argument("--n-top", type=int, default=10,
+                        help="Top results to use as seeds for next round")
+    parser.add_argument("--chunk", type=int, default=1000,
+                        help="Points to add per round (growth step)")
+    parser.add_argument("--step-ihyper", type=int, default=5,
+                        help="Max IHyper blocks per exploration run")
+    parser.add_argument("--step-mmerge", type=int, default=3,
+                        help="Max MHyper pure-merge iters (exploration)")
+    parser.add_argument("--step-mimpurity", type=int, default=2,
+                        help="Max MHyper impurity iters (exploration)")
+    parser.add_argument("--step-mmerge-deep", type=int, default=10,
+                        help="Max MHyper merge iters for seed refinement (capture worsen-then-benefit)")
+    parser.add_argument("--step-mimpurity-deep", type=int, default=6,
+                        help="Max MHyper impurity iters for seed refinement")
     args = parser.parse_args()
 
-    base = Path(__file__).parent
+    data_dir = Path(__file__).resolve().parent.parent / "data"
 
     print("Loading data...")
-    train_df = pd.read_csv(base / "mnist_train_reduced.csv")
-    test_df = pd.read_csv(base / "mnist_test_reduced.csv")
+    train_path = data_dir / "mnist_train_dr.csv"
+    test_path = data_dir / "mnist_test_dr.csv"
+    if not train_path.exists() or not test_path.exists():
+        raise SystemExit(
+            f"Data not found in {data_dir}. Run apply_dimensionality_reduction.py first."
+        )
+    train_df = pd.read_csv(train_path)
+    test_df = pd.read_csv(test_path)
 
     label_col = "class" if "class" in train_df.columns else "label"
     feat_cols = [c for c in train_df.columns if c != label_col]
@@ -419,120 +451,117 @@ def main():
     X_test = test_df[feat_cols].values.astype(np.float64)
     y_test = test_df[label_col].values.astype(int)
 
-    n_train = len(X_train)
-    n_val = n_train // 5
-    n_fit = n_train - n_val
-    X_fit = X_train[:n_fit]
-    y_fit = y_train[:n_fit]
-    X_val = X_train[n_fit:]
-    y_val = y_train[n_fit:]
+    n_jobs = mp.cpu_count() if args.n_jobs <= 0 else args.n_jobs
+    k = 3
+    chunk = args.chunk
+    target_acc = 0.95
+    rng = np.random.default_rng(42)
 
-    if args.max_points is not None and len(X_fit) > args.max_points:
-        rng = np.random.default_rng(42)
-        idx = rng.choice(len(X_fit), args.max_points, replace=False)
-        X_fit = X_fit[idx]
-        y_fit = y_fit[idx]
-        print(f"Subsampled to {args.max_points} training points")
+    n_max = args.max_points if args.max_points is not None else len(X_train)
+    n_max = min(n_max, len(X_train))
 
-    print(f"Training on {len(X_fit)} points, validating on {len(X_val)}")
+    # Stratified ordering: interleave by class so perm[:n] has balanced classes
+    classes = np.unique(y_train)
+    by_class = [rng.permutation(np.where(y_train == c)[0]) for c in classes]
+    max_per_class = max(len(arr) for arr in by_class)
+    perm = []
+    for i in range(max_per_class):
+        for arr in by_class:
+            if i < len(arr):
+                perm.append(arr[i])
+    perm = np.array(perm)
 
-    if args.algorithm == "prototype":
-        print(f"Selecting {args.max_hyperblocks} prototypes (K-means centroids)...")
-        hyperblocks = prototype_hyperblocks(X_fit, y_fit, args.max_hyperblocks)
-        print(f"Created {len(hyperblocks)} hyperblocks")
-        print("Learning k on validation set...")
-        k_best = learn_k(X_val, y_val, hyperblocks, k_max=min(50, len(hyperblocks)))
-        val_acc = accuracy(X_val, y_val, hyperblocks, k_best)
-        test_acc = accuracy(X_test, y_test, hyperblocks, k_best)
-        print(f"Best k = {k_best}")
-        print(f"Validation accuracy: {val_acc:.4f}")
-        print(f"Test accuracy: {test_acc:.4f}")
-    elif args.algorithm == "cluster":
-        print(f"Creating cluster hyperblocks (max {args.max_hyperblocks})...")
-        hyperblocks = cluster_hyperblocks(X_fit, y_fit, args.max_hyperblocks)
-        print(f"Created {len(hyperblocks)} hyperblocks")
-        print("Learning k on validation set...")
-        k_best = learn_k(X_val, y_val, hyperblocks, k_max=min(50, len(hyperblocks)))
-        val_acc = accuracy(X_val, y_val, hyperblocks, k_best)
-        test_acc = accuracy(X_test, y_test, hyperblocks, k_best)
-        print(f"Best k = {k_best}")
-        print(f"Validation accuracy: {val_acc:.4f}")
-        print(f"Test accuracy: {test_acc:.4f}")
-    elif args.algorithm == "all_points":
-        # Each training point = single-point hyperblock. k-NN = standard k-NN on training data.
-        print("Creating single-point hyperblocks (one per training point)...")
-        hyperblocks = [Hyperblock(X_fit[i].copy(), X_fit[i].copy(), int(y_fit[i]))
-                       for i in range(len(X_fit))]
-        print(f"Created {len(hyperblocks)} hyperblocks")
-        # Use sklearn for fast k selection (equivalent for point blocks)
-        try:
-            from sklearn.neighbors import KNeighborsClassifier
-            knn = KNeighborsClassifier(n_neighbors=5, weights='uniform')
-            knn.fit(X_fit, y_fit)
-            best_acc, k_best = 0.0, 1
-            for k in range(1, min(51, len(hyperblocks) + 1)):
-                knn.set_params(n_neighbors=k)
-                acc = knn.score(X_val, y_val)
-                if acc > best_acc:
-                    best_acc, k_best = acc, k
-            knn.set_params(n_neighbors=k_best)
-            val_acc = knn.score(X_val, y_val)
-            test_acc = knn.score(X_test, y_test)
-            print(f"Learning k on validation set... Best k = {k_best}")
-            print(f"Validation accuracy: {val_acc:.4f}")
-            print(f"Test accuracy: {test_acc:.4f}")
-        except ImportError:
-            print("Learning k on validation set...")
-            k_best = learn_k(X_val, y_val, hyperblocks, k_max=min(50, len(hyperblocks)))
-            val_acc = accuracy(X_val, y_val, hyperblocks, k_best)
-            test_acc = accuracy(X_test, y_test, hyperblocks, k_best)
-            print(f"Best k = {k_best}")
-            print(f"Validation accuracy: {val_acc:.4f}")
-            print(f"Test accuracy: {test_acc:.4f}")
-    else:
-        print(f"Running {args.algorithm.upper()}...")
-        if args.algorithm == "ihyper":
-            hyperblocks = ihyper(X_fit, y_fit, purity_threshold=0.95, n_jobs=args.n_jobs)
-        elif args.algorithm == "mhyper":
-            hyperblocks = mhyper(X_fit, y_fit, impurity_threshold=0.05, n_jobs=args.n_jobs)
+    # BAP: seed spread net, pull in best group, repeat
+    seed_indices = np.array([], dtype=np.int64)
+    seed_hbs: List[List[Hyperblock]] = []
+    best_hbs: List[Hyperblock] = []
+    best_acc = 0.0
+    n_fit = 0
+
+    while n_fit < n_max:
+        n_fit = min(n_fit + chunk, n_max)
+        if len(seed_indices) > 0:
+            idx = np.unique(np.concatenate([seed_indices, perm[:n_fit]]))[:n_fit]
         else:
-            hyperblocks = imhyper(X_fit, y_fit, purity_threshold=0.95,
-                                 impurity_threshold=0.05, n_jobs=args.n_jobs)
-        print(f"Created {len(hyperblocks)} hyperblocks")
-        print("Learning k on validation set...")
-        k_best = learn_k(X_val, y_val, hyperblocks, k_max=min(50, len(hyperblocks)))
-        val_acc = accuracy(X_val, y_val, hyperblocks, k_best)
-        test_acc = accuracy(X_test, y_test, hyperblocks, k_best)
-        print(f"Best k = {k_best}")
-        print(f"Validation accuracy: {val_acc:.4f}")
-        print(f"Test accuracy: {test_acc:.4f}")
+            idx = perm[:n_fit]
+        X_fit = X_train[idx]
+        y_fit = y_train[idx]
 
-    # Save hyperblocks to CSV (spec: class + 1x1..11x11 for single-point; full lower/upper for boxes)
-    out_path = base / "hyperblocks.csv"
+        print(f"\n--- Round: {len(X_fit)} pts, {len(seed_hbs)} seed HB sets ---")
+
+        candidates: List[Tuple[List[Hyperblock], float]] = []
+
+        if not seed_hbs:
+            # First round: many short IMHyper runs
+            for t in range(args.n_trials):
+                trial_perm = rng.permutation(len(X_fit))
+                X_t = X_fit[trial_perm]
+                y_t = y_fit[trial_perm]
+                hbs = imhyper(X_t, y_t, purity_threshold=0.95, impurity_threshold=0.05,
+                             n_jobs=n_jobs, max_ihyper_blocks=args.step_ihyper,
+                             max_mhyper_merge_iters=args.step_mmerge,
+                             max_mhyper_impurity_iters=args.step_mimpurity)
+                acc = accuracy(X_test, y_test, hbs, k)
+                candidates.append((hbs, acc))
+        else:
+            # Later rounds: MHyper from each seed (DEEP steps to capture worsen-then-benefit)
+            # + fresh IMHyper for exploration
+            for hb_seed in seed_hbs:
+                hbs = mhyper(X_fit, y_fit, initial_blocks=hb_seed,
+                            impurity_threshold=0.05, n_jobs=n_jobs,
+                            max_merge_iters=args.step_mmerge_deep,
+                            max_impurity_iters=args.step_mimpurity_deep)
+                acc = accuracy(X_test, y_test, hbs, k)
+                candidates.append((hbs, acc))
+            for _ in range(min(4, args.n_trials - len(seed_hbs))):
+                trial_perm = rng.permutation(len(X_fit))
+                hbs = imhyper(X_fit[trial_perm], y_fit[trial_perm],
+                             purity_threshold=0.95, impurity_threshold=0.05,
+                             n_jobs=n_jobs, max_ihyper_blocks=args.step_ihyper,
+                             max_mhyper_merge_iters=args.step_mmerge,
+                             max_mhyper_impurity_iters=args.step_mimpurity)
+                acc = accuracy(X_test, y_test, hbs, k)
+                candidates.append((hbs, acc))
+
+        if not candidates:
+            break
+        candidates.sort(key=lambda x: -x[1])
+        top = candidates[: args.n_top]
+        seed_hbs = [hbs for hbs, _ in top]
+        seed_indices = idx.copy()
+
+        best_hbs, best_acc = top[0]
+        print(f"Top acc: {best_acc:.4f} (n_hbs={len(best_hbs)})")
+        if best_acc >= target_acc:
+            print(f"Reached {target_acc:.0%} with {n_fit} pts")
+            break
+
+    hyperblocks = best_hbs
+    test_acc = best_acc
+    if test_acc < target_acc:
+        print(f"Stopped at {n_max} pts; best acc {test_acc:.4f} < {target_acc:.0%}")
+
+    # Save hyperblocks to CSV
+    out_path = data_dir / "hyperblocks_hyper.csv"
     dim_names = [f"{i}x{j}" for i in range(1, 12) for j in range(1, 12)]
-    single_point = args.algorithm in ("prototype", "all_points")
     rows = []
-    for hb in hyperblocks:
-        if single_point:
-            row = {"class": hb.label}
-            for j, name in enumerate(dim_names):
-                row[name] = hb.lower[j]
-        else:
-            row = {"class": hb.label}
-            for j, name in enumerate(dim_names):
-                row[f"lower_{name}"] = hb.lower[j]
-            for j, name in enumerate(dim_names):
-                row[f"upper_{name}"] = hb.upper[j]
+    for i, hb in enumerate(hyperblocks):
+        row = {"class": hb.label, "hb_id": i}
+        for j, name in enumerate(dim_names):
+            row[f"lower_{name}"] = hb.lower[j]
+        for j, name in enumerate(dim_names):
+            row[f"upper_{name}"] = hb.upper[j]
         rows.append(row)
     pd.DataFrame(rows).to_csv(out_path, index=False)
     print(f"Saved {len(hyperblocks)} hyperblocks to {out_path}")
 
     pd.DataFrame([{
-        "k": k_best,
+        "algorithm": "IMHyper",
+        "k": k,
+        "n_train": n_fit,
         "n_hyperblocks": len(hyperblocks),
-        "val_accuracy": val_acc,
         "test_accuracy": test_acc,
-    }]).to_csv(base / "hyperblock_metadata.csv", index=False)
+    }]).to_csv(data_dir / "hyperblock_metadata_hyper.csv", index=False)
 
 
 if __name__ == "__main__":
