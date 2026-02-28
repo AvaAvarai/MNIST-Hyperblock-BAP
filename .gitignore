@@ -9,3 +9,9 @@ venv/
 
 # Data files
 data/
+
+# Logs
+logs/
+
+# Reports
+reports/
