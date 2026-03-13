@@ -5,6 +5,7 @@ Bidirectional Active Processing (BAP) approach that gathers training cases in ba
 ## Stratified ordering
 
 Build a stratified index order over train data:
+
 - Group indices by class
 - Shuffle each class
 - Interleave round-robin across classes
@@ -35,7 +36,7 @@ while n_fit < n_max:
         for each hb_seed in seed_hbs:
             hbs = MHyper(X_fit, y_fit, initial_blocks=hb_seed) in refinement mode
             acc = classify test with hbs, k=3
-            add (hbs, acc) to candidates
+          q q      add (hbs, acc) to candidates
         for a few extra runs:
             shuffle X_fit, y_fit
             hbs = IMHyper(X, y) in exploration mode
@@ -64,4 +65,29 @@ return best_hbs
 - Classification: in-block → block class; outside → k-NN over HBs, k=3 (Snyder et al. [3]).
 - HB simplify: redundant attribute removal, redundant block removal via overlap, disjunctive units (Snyder et al. [3]; to be implemented).
 
-See README.md for references [1]–[3]. 
+See README.md for references [1]–[3].
+
+## Next Steps
+
+find largest HBs
+see top 10 size wise
+ideally ~4000 cases
+visualize 10 pictures
+if HBs are pure then 100% accuracy
+see what ACC is provided with K-NN with k=3 for other cases
+
+Other path:
+use knn for classifier
+aim for 1800 - 2300
+then build HBs on these cases only
+
+capture majority of cases with HBs then visualize them
+
+binary search take 1/2 then 1/4 then ... splitting best each time.
+
+Find one small dataset, small set of large HBs, then see howm many real cases will be in those HBs.
+
+
+Vusyakuzagui bthen can viz with GLC-L, all 10 in one plane, then connect HB low edge to top edge with a red line. Do for each HB. Show only this with toggle of 
+
+full lossless viz in GLC-L then can optimize the slope of the red line to make red arrow not overlapping. Order of attributes can also be used to viz distintly these HBs.
